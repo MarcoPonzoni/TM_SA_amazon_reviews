@@ -1,0 +1,600 @@
+---
+title: "ASSIGNMENT_TEXT_MINING"
+output: html_document
+date: "2023-05-28"
+---
+#SCRAPE AMAZON
+
+##PRODUCT DETAILS 
+We consider the silver colorway, which has id = B08N5NMHM3.
+```{r message=FALSE, warning=FALSE}
+library(rvest)
+library(RSelenium)
+library(tidyverse)
+library(tidytext)
+library(stringi)
+library(cld2)
+library(wordcloud)
+library(reshape2)
+library(gridExtra)
+library(udpipe)
+library(tm)
+library(topicmodels)
+
+setwd("/Users/marcoponzoni/Desktop")
+setwd("/Users/marcoponzoni/Desktop/TEXT MINING AND SENTIMENT ANALYSIS/ASSIGNMENT")
+```
+
+
+```{r}
+#define the url corresponding to the product webpage
+url_product = "https://www.amazon.co.uk/dp/B08N5NMHM3/ref=uk_a_macbook_0?th=1"
+
+html_product = read_html(url_product)
+```
+
+PRODUCT NAME
+```{r}
+#PRODUCT NAME
+product_name = html_product %>% 
+  html_element("[class='a-size-large product-title-word-break']") %>% 
+  html_text2()
+product_name
+```
+
+PRODUCT DESCRIPTION
+```{r}
+#PRODUCT DESCRIPTION
+product_description = html_product %>% 
+  html_elements("[class='a-unordered-list a-vertical a-spacing-mini']") %>% 
+  html_text2() %>% 
+  str_split("\n") %>% 
+  unlist()
+product_description
+```
+
+TECHNICAL DETAILS (table)
+```{r}
+#TABLE CONTAINING TECHNICAL DETAILS AT THE BOTTOM OF THE PAGE
+detail_table = html_product %>% 
+  html_element(css = ".content-grid-row-wrapper~ .content-grid-row-wrapper+ .content-grid-row-wrapper .a-row") %>% 
+  html_table(header = F)
+
+detail_table$Specifics = detail_table$X1 
+detail_table$Technical_Detail = detail_table$X2
+
+detail_table = detail_table %>% 
+  select(-X1, -X2)
+
+View(detail_table)
+
+```
+
+
+PRODUCT DETAILS
+```{r}
+#PRODUCT DETAILS SHOWED AT THE TOP OF THE PAGE
+labels = html_product %>% 
+  html_elements("[class='a-form-label']") %>% 
+  html_text2()
+labels
+
+selections = html_product %>% 
+  html_elements("[class='selection']") %>% 
+  html_text2()
+selections
+
+product_details = str_c(labels, selections, sep = " ")
+
+library(stringi)
+
+product_details1 = html_product %>% 
+  html_elements("[class='a-section a-spacing-small a-spacing-top-small']") %>% 
+  html_text2() %>%
+  stri_replace_last_fixed('\t', '') %>% 
+  str_replace_all("\t\n", "_") %>% #simplify=F by default
+  str_replace_all("\t", ": ") %>% 
+  str_split("_") %>% 
+  unlist()
+
+prod_details_complete = c(product_details, product_details1)
+prod_details_complete
+```
+
+NUMBER OF RATINGS
+```{r}
+#NUMBER OF RATINGS
+ratings_no = html_product %>% 
+  html_element("[class='a-size-base']#acrCustomerReviewText") %>% 
+  html_text2()
+ratings_no
+```
+
+FASTEST DELIVERY DATE (DYNAMIC)
+```{r}
+#WE PERFORMED A DYNAMIC SCRAPING SINCE WHEN WE STARTED OUR ASSIGNMENT THE DELIVERY OPTIONS WERE TEMPORARILY SHOWED IN A WINDOW ACCESSIBLE AFTER CLICKING "See All Buying Options" AT THE TOP OF THE PAGE
+rD = rsDriver(browser = "firefox",
+               chromever = NULL)
+
+remDr = rD[["client"]]
+
+url = "https://www.amazon.co.uk/dp/B08N5NMHM3/ref=uk_a_macbook_0?th=1"
+
+remDr$open()
+remDr$navigate(url)
+
+button = remDr$findElement(using = "css", value = "#sp-cc-accept") #accept cookies
+button$clickElement()
+
+button = remDr$findElement(using = "css", value = "#buybox-see-all-buying-choices .a-button-text")
+button$clickElement()
+
+output = remDr$getPageSource(header = TRUE)
+write(output[[1]], file = "product2.html")
+
+remDr$close()
+rD$server$stop()
+```
+
+
+```{r}
+#FASTEST DELIVERY DATE OBTAINED THROUGH DYNAMIC SCRAPING
+html_product_2 = read_html("product2.html", encoding = "utf-8")
+
+fastest_delivery = html_product_2 %>%
+    html_elements("[class='a-text-bold']") %>%
+    html_text2() %>%
+    head()
+
+view(fastest_delivery)
+
+fastest_delivery[2] #we use the index [2] because we cannot find an id to identify the delivery date.
+```
+
+
+FASTEST DELIVERY
+```{r}
+#IN THE FOLLOWING DAYS THE DELIVERY OPTIONS WERE BACK TO THE USUAL VISUALIZATION, BUT THEY COULD CHANGE
+fastest_delivery_1 = html_product %>%
+    html_elements("[class='a-text-bold']") %>%
+    html_text2() %>%
+    head()
+
+fastest_delivery_1[2]
+```
+
+```{r}
+#all the information about the product grouped in a list
+prod_info = list(technical_details = detail_table, name = product_name, description = product_description, details = prod_details_complete, number_of_ratings = ratings_no, date = fastest_delivery[2])
+
+save(prod_info, file = "prod_info.rda")
+```
+
+
+##SCRAPING REVIEWS
+Define the function:
+```{r}
+library(rvest)
+library(tidyverse)
+
+#WE DEFINE THE FUNCTION TO SCRAPE THE REVIEWS FROM THE AMAZON WEBSITE
+get_reviews_ = function(id, page) {
+
+    url = paste0("https://www.amazon.co.uk/product-reviews/",
+        id, "/?pageNumber=", page)
+    html = read_html(url)
+
+    # Review title (UK and not-UK)
+    title = html %>%
+        html_elements("[class='a-size-base a-link-normal review-title a-color-base review-title-content a-text-bold']") %>%
+        html_text2()
+
+    title = title %>%
+        c(html %>%
+            html_elements("[class='a-size-base review-title a-color-base review-title-content a-text-bold']") %>%
+            html_text2())
+
+    # Review text (the same for UK and not-UK)
+    text = html %>%
+        html_elements("[class='a-size-base review-text review-text-content']") %>%
+        html_text2()
+
+    # Review stars (UK and not-UK)
+    star = html %>%
+        html_elements("[data-hook='review-star-rating']") %>%
+        html_text2()
+
+    star = star %>%
+        c(html %>%
+            html_elements("[data-hook='cmps-review-star-rating']") %>%
+            html_text2())
+
+    # Return a tibble
+    tibble(title, text, star, page = page) %>%
+        return()
+}
+```
+
+Get the data and create a dataframe:
+```{r}
+id = "B08N5NMHM3"
+page = 1:50 #we set pages from 1 to 50 in order to get all the reviews
+
+#create a dataframe containing all the data 
+reviews_data = map_df(page, ~get_reviews_(id = "B08N5NMHM3", page = .))
+
+#create an id which univocally identify each review
+reviews_data$doc_id = 1:nrow(reviews_data)
+
+view(reviews_data)
+
+setwd("/Users/marcoponzoni/Desktop/TEXT MINING AND SENTIMENT ANALYSIS/ASSIGNMENT")
+save(reviews_data, file = "reviews_data.rda")
+load(file = "reviews_data.rda")
+```
+
+##DATA CLEANING
+We need to detect the language, since reviews come both from UK and other countries and mantain only reviews in english.
+```{r}
+library(cld2)
+
+#DETECT THE LANGUAGE (we are interested only in reviews written in english)
+reviews_data$title_language = detect_language(reviews_data$title)
+reviews_data$text_language = detect_language(reviews_data$text)
+
+table(reviews_data$title_language, reviews_data$text_language)
+
+#how many reviews in english?
+reviews_data %>% count(text_language)
+
+#filter only reviews in english
+reviews_data = reviews_data %>% 
+  filter(text_language == "en")
+head(reviews_data)
+
+#we need to extract the score from the column star
+reviews_data = reviews_data %>% 
+  mutate(star_score = as.numeric(substring(star,1,1)))
+view(reviews_data)
+
+#to see frequencies
+reviews_data %>%
+    count(star_score) %>%
+    mutate(rel_freq = round(n/sum(n), 2))
+```
+
+##DATA VISUALIZATION
+PLOT 1
+```{r}
+#relative frequencies of star scores
+reviews_data %>%
+    ggplot(aes(x = star_score)) + 
+    geom_bar(aes(y = after_stat(count/nrow(reviews_data))*100), fill = "orange") +
+    labs(title = "Amazon reviews' stars", subtitle = "Apple 2020 MacBook Air Laptop M1 Chip",
+        x = "Stars", y = "Star scores percentage") + 
+  coord_flip() +
+  theme_bw() +
+    theme(plot.title = element_text(color = "darkorange", size = 15,
+        face = "bold"), plot.subtitle = element_text(color = "black"))
+```
+
+```{r}
+#we get number of characters used to write the reviews
+reviews_data$ncharacters = str_length(reviews_data$text)
+
+#we plot the distribution of no. of characters used grouped by star score
+reviews_data %>% ggplot(aes(x = ncharacters)) +
+    geom_histogram(aes(y = after_stat(density)), fill = "darkolivegreen3")+
+  geom_density(col = "darkgreen", alpha = 0) + 
+   labs(title = "Density distrib. of characters used in reviews", subtitle = "Apple 2020 MacBook Air Laptop M1 Chip",
+        x = "Number of characters", y = "Density") + 
+      facet_wrap(~ star_score) + 
+  theme(plot.title = element_text(color = "darkolivegreen", size = 15,
+        face = "bold"), plot.subtitle = element_text(color = "darkolivegreen4"))
+
+```
+
+
+##SENTIMENT ANALYSIS
+
+###TIDY
+We start our sentiment analysis by converting our data into the tidy format and we remove stop words and numbers:
+```{r}
+#turn reviews into tidy format, remove stop words and digits
+reviews_tidy = reviews_data %>%
+    unnest_tokens(word, text) 
+
+#we have an issue with a character ("’") which has a different format and did not allow us to remove all the stopwords. We replaced it with the right character ("'").
+reviews_tidy$word = gsub("’", "'", reviews_tidy$word)
+
+reviews_tidy = reviews_tidy %>% 
+    anti_join(stop_words) %>% #we remove the stop words
+    filter(!str_detect(word, "[[:digit:]]")) #we remove the numbers/digits
+
+View(reviews_tidy)
+```
+
+
+###BING
+```{r}
+#lexicon
+bing = get_sentiments("bing")
+view(bing)
+
+view(reviews_data)
+
+#get polarities
+bing_pol = reviews_tidy %>% 
+  select(doc_id, word) %>% 
+  inner_join(bing) %>% 
+  count(doc_id, sentiment) %>% 
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(bing.polarity = positive - negative)
+view(bing_pol)
+
+#we join our bing sentiment polarity with the original data
+reviews_data = reviews_data %>% 
+  left_join(bing_pol %>% select(doc_id, bing.polarity))
+#NA VALUES FOR DOCUMENTS NOT CLASSIFIED
+
+view(reviews_data)
+
+#frequency table
+reviews_data %>% 
+  mutate(pol.sentiment = ifelse(bing.polarity == 0, "neutral", 
+                                ifelse(bing.polarity > 0, "positive", "negative"))) %>% 
+  count(pol.sentiment) %>% 
+  mutate(percentage = n/nrow(reviews_data)*100)
+
+#POLARITY DISTRIBUTION GRAPHICAL REPRESENTATION
+reviews_data %>% 
+  ggplot(aes(bing.polarity)) +
+  geom_histogram(fill = "orange", col = "black") +
+  labs(title = "Sentiment distribution - tidy approach (bing lexicon)",
+       x = "polarity", y = "frequency") +
+  theme_bw() +
+    theme(plot.title = element_text(color = "darkorange", size = 15,
+        face = "bold"), plot.subtitle = element_text(color = "black"))
+
+#summary statistics
+summary(reviews_data$bing.polarity)
+
+#reviews_data$ncharacters[which.max(reviews_data$bing.polarity)]
+#max(reviews_data$ncharacters)
+
+```
+
+We can also see the contribution of words to the sentiment:
+```{r}
+bing_sent_freq = reviews_tidy %>% 
+  inner_join(bing) %>%
+    count(word, sentiment, sort = TRUE) %>%
+    ungroup()
+
+#wordcloud to visualize word contribution to sentiment
+library(wordcloud)
+library(reshape2)
+dev.new(width=3000, height = 1500, unit="px")
+bing_sent_freq %>% 
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+    comparison.cloud(colors = c("red", "green"), max.words = 200)
+
+```
+
+
+###UDPIPE
+```{r}
+library(udpipe)
+
+#udpipe format
+reviews_udpipe = udpipe(reviews_data, "english-gum")
+view(reviews_udpipe)
+
+#recode the sentiment into -1, +1
+bing_udpipe = bing %>%
+    mutate(sentiment = ifelse(sentiment == "negative", -1, 1)) %>%
+    rename(term = "word", polarity = "sentiment")
+
+#SENTIMENT POLARITIES WITHOUT AMPLIFIERS/NEGATORS
+udpipe_pol0 = txt_sentiment(x = reviews_udpipe, term = "token" , polarity_terms = bing_udpipe,
+    polarity_negators = NULL, polarity_amplifiers = NULL,
+    n_before = 0, n_after = 0, constrain = F)
+
+#SENTIMENT POLARITIES WITH AMPLIF./NEGATORS, 2 BEFOR AND 2 AFTER
+udpipe_pol22 = txt_sentiment(x = reviews_udpipe, term = "token" , polarity_terms = bing_udpipe,
+    polarity_negators = c("not", "no", "neither", "none"), polarity_amplifiers = c("like", "really", "very", "many"), amplifier_weight = 0.8, n_before = 2, n_after = 2, constrain = F)
+
+udpipe_pol22
+
+summary(reviews_data$bing.polarity)
+summary(udpipe_pol0$overall$sentiment_polarity)
+summary(udpipe_pol22$overall$sentiment_polarity)
+
+#WE CHOOSE udpipe_pol22
+reviews_data$udpipe.polarity = udpipe_pol22$overall$sentiment_polarity
+view(reviews_data)
+
+#frequency table
+reviews_data %>% 
+  mutate(pol.sentiment = ifelse(udpipe.polarity == 0, "neutral", 
+                                ifelse(udpipe.polarity > 0, "positive", "negative"))) %>% 
+  count(pol.sentiment) %>% 
+  mutate(percentage = n/nrow(reviews_data)*100) #NO NA VALUES
+
+#POLARITY DISTRIBUTION GRAPHICAL REPRESENTATION
+reviews_data %>% 
+  ggplot(aes(udpipe.polarity)) +
+  geom_histogram(fill = "orange", color = "black") +
+  labs(title = "Sentiment distribution - udpipe approach (bing lexicon)",
+       x = "Polarity", y = "Frequency") +
+  theme_bw() +
+    theme(plot.title = element_text(color = "darkorange", size = 15,
+        face = "bold"), plot.subtitle = element_text(color = "black"))
+```
+
+
+Now we compare the two distributions of polarities obtained with the two approaches:
+```{r}
+#comparison between two sentiment distributions (HISTOGRAMS)
+library(gridExtra)
+plot_bing = reviews_data %>% 
+  ggplot(aes(bing.polarity)) +
+  geom_histogram(fill = "orange", col = "black") +
+  labs(title = "Sentiment pol. distrib. - tidy",
+       x = "Bing polarity", y = "Frequency") +
+  theme_bw() +
+    theme(plot.title = element_text(color = "darkorange", size = 15,
+        face = "bold"), plot.subtitle = element_text(color = "black")) 
+ 
+plot_udpipe = reviews_data %>% 
+  ggplot(aes(udpipe.polarity)) +
+  geom_histogram(fill = "orange", color = "black") +
+  labs(title = "Sentiment pol. distrib. - udpipe",
+       x = "Udpipe polarity", y = "Frequency") +
+  theme(plot.title = element_text(color = "darkorange", size = 15,
+        face = "bold"), plot.subtitle = element_text(color = "black")) 
+
+grid.arrange(plot_bing, plot_udpipe, ncol = 2)
+```
+
+
+```{r}
+#DO POLARITIES COMPUTED RESEMBLE THE SENTIMENT EXPRESSED THROUGH STAR RATINGS?
+reviews_data = reviews_data %>% 
+  mutate(star_sent = ifelse(star_score > 3, "positive", "negative"))
+#we assume that star score >3 correspond to positive sentiment 
+
+reviews_data %>%
+    select(doc_id, star_sent, udpipe.polarity, bing.polarity) %>%
+    mutate(star_sent = ifelse(star_sent == "positive", 1, -1),
+        udpipe = ifelse(udpipe.polarity > 0, 1, ifelse(udpipe.polarity < 0, -1,
+            0)), tidy = ifelse(bing.polarity > 0, 1, ifelse(bing.polarity< 0,
+            -1, 0)), bing.polarity = replace_na(bing.polarity, 0)) %>%
+    pivot_longer(cols = c("star_sent", "udpipe", "tidy")) %>%
+    ggplot(aes(doc_id, value, fill = name)) + geom_col(show.legend = FALSE) +
+    facet_wrap(~name, ncol = 1, scales = "free_y", strip.position = "right") +
+    labs(title = "Sentiment polarities comparison with star sentiment",
+       x = "Review_ID", y = "Score") +
+    theme_bw() + 
+    scale_fill_manual(values = c("darkorange",
+    "orange", "darkorange4")) +
+    theme(plot.title = element_text(color = "black", size = 15,
+        face = "bold"), plot.subtitle = element_text(color = "black")) 
+  
+```
+
+
+#LDA
+
+##DATA
+```{r}
+#data processing
+reviews_tidy_2 = reviews_tidy %>%
+    select(doc_id, word) %>%
+    count(doc_id, word) #how many times each word in each document
+view(reviews_tidy_2)
+
+#dtm format
+reviews_dtm = reviews_tidy_2 %>% 
+  cast_dtm(doc_id, word, n)
+
+library(tm)
+inspect(reviews_dtm) 
+```
+
+##PERPLEXITY
+```{r}
+library(topicmodels)
+
+#we split the dtm object into training set and test set
+set.seed(89326)
+train_indexes = sample(rownames(reviews_dtm), nrow(reviews_dtm) * 0.75)
+train_indexes
+
+dtm_train = reviews_dtm[rownames(reviews_dtm) %in% train_indexes, ]
+dtm_test = reviews_dtm[!rownames(reviews_dtm) %in% train_indexes, ]
+
+
+topics_score = data.frame(k = seq(5, 35, 5), perplexity = NA)
+
+for (i in 1:nrow(topics_score)) {
+    print(topics_score$k[i])
+    #we implement LDA for each k using training set
+    rev_lda = LDA(dtm_train, method = "Gibbs", k = topics_score$k[i], control = list(seed = 4567))
+    #we compute the perplexity using the test set
+    topics_score$perplexity[i] = perplexity(rev_lda, dtm_test)
+}
+
+view(topics_score)
+
+#we represent graphically the perplexity scores
+perp_plot = topics_score %>% 
+  ggplot(aes(x = k, y = perplexity)) + geom_line(col = "darkorange") +
+  labs(title = "Perplexity scores for different no. of topics", y = "Perplexity", x = "No. of topics (k)") +
+  theme_bw() +
+  theme(plot.title = element_text(color = "darkorange", size = 13, face = "bold"))
+
+plotly::ggplotly(perp_plot) #interactive plot
+
+#The lower the perplexity, the better the fit
+
+#10 seems to be a good choice
+```
+
+###LDA WITH 10 TOPICS
+```{r}
+library(topicmodels)
+set.seed(4567)
+#we implement LDA with k = 10
+reviews_lda_best = LDA(reviews_dtm, method = "Gibbs", k=10, control = list(seed=4567))
+
+#beta matrix
+rev_beta_best = tidy(reviews_lda_best, matrix = "beta")
+view(rev_beta_best)
+
+#top 10 terms per topic
+rev_top10_best = rev_beta_best %>% 
+  group_by(topic) %>% 
+  slice_max(beta, n = 10) %>% 
+  ungroup() %>% 
+  arrange(topic, -beta)
+view(rev_top10_best)
+
+#we can plot the top terms
+rev_top10_best %>% 
+  ggplot(aes(beta, term)) +
+  geom_col(aes(fill = factor(topic)), show.legend = F) +
+  facet_wrap(~ topic, scales = "free") +
+  labs(title = "Top 10 terms for each topic", y = "Terms", x = "Beta") +
+  theme_bw() +
+  theme(plot.title = element_text(color = "black", size = 20, face = "bold"),
+                                  axis.text.y=element_text(size=18),
+        axis.text.x = element_text(size=13))
+
+#gamma matrix
+rev_gamma_best = tidy(reviews_lda_best, matrix = "gamma")
+view(rev_gamma_best)
+
+#highest topic proportion per document
+topics_best = rev_gamma_best %>% 
+  group_by(document) %>%
+  slice_max(gamma) %>%
+  ungroup() %>%
+  arrange(as.numeric(document))
+view(topics_best)
+
+#topic assignment to each word 
+word_ass_best = augment(reviews_lda_best, reviews_dtm)
+view(word_ass_best)
+
+#not able to assign a single topic to each document 
+```
+
+
+
+
+
+
+
+
+
